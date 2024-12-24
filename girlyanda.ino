@@ -1,158 +1,166 @@
 #include <WiFi.h>
-#include <ESPAsyncWebServer.h>
+#include <EEPROM.h>
+#include <WebServer.h>
+#include <NTPClient.h>
+#include <WiFiUdp.h>
 
-
+// Настройки Wi-Fi
+const char* ssid = "TuRbiNa5";
+const char* password = "cfvfhwtd";
+bool gir_on=false;
 // Статические IP настройки
-IPAddress local_IP(192, 168, 3, 213); // Задайте статический IP
-IPAddress gateway(192, 168, 3, 100);    // Шлюз
+IPAddress local_IP(192, 168, 0, 113); // Задайте статический IP
+IPAddress gateway(192, 168, 0, 1);    // Шлюз
 IPAddress subnet(255, 255, 255, 0);  // Маска подсети
-
-// Параметры подключения к Wi-Fi
-const char* ssid = "TP-LINK_nio2";
-const char* password = "k5219k5219";
+IPAddress primaryDNS(192, 168, 0, 1);    // DNS-сервер (по желанию)
+IPAddress secondaryDNS(8, 8, 4, 4);  // Резервный DNS (по желанию)
 
 // Пины
-const int relayPin = 12; // Пин для реле
+#define RELAY_PIN_1 12  // Пин реле
+#define RELAY_PIN_2 33  // Пин реле
+// Глобальные переменные
+int startHour = 18; // Час включения по умолчанию
+int startMinute = 0; // Минута включения по умолчанию
+int stopHour = 23; // Час выключения по умолчанию
+int stopMinute = 0; // Минута выключения по умолчанию
 
-// Время работы
-int startHour = 9;
-int stopHour = 11;
+// Для работы с временем
+WiFiUDP ntpUDP;
+NTPClient timeClient(ntpUDP, "pool.ntp.org", 3 * 3600, 3600000); // Часовой пояс +3 и обновление раз в час
 
 // Веб-сервер
-AsyncWebServer server(80);
+WebServer server(80);
+
+// Сохранение параметров в EEPROM
+void saveSettings() {
+  EEPROM.write(0, startHour);
+  EEPROM.write(1, startMinute);
+  EEPROM.write(2, stopHour);
+  EEPROM.write(3, stopMinute);
+  EEPROM.commit();
+}
+
+// Загрузка параметров из EEPROM
+void loadSettings() {
+  startHour = EEPROM.read(0);
+  startMinute = EEPROM.read(1);
+  stopHour = EEPROM.read(2);
+  stopMinute = EEPROM.read(3);
+}
+
+// Функция проверки времени для включения/выключения гирлянды
+void controlRelay() {
+  int currentHour = timeClient.getHours();
+  int currentMinute = timeClient.getMinutes();
+
+  // Проверка времени
+  if ((currentHour > startHour || (currentHour == startHour && currentMinute >= startMinute)) &&
+      (currentHour < stopHour || (currentHour == stopHour && currentMinute < stopMinute))) {
+    digitalWrite(RELAY_PIN_1, LOW); // Включить реле
+     digitalWrite(RELAY_PIN_2, LOW); // Включить реле
+    gir_on=true;
+  } else {
+    digitalWrite(RELAY_PIN_1, HIGH); // Выключить реле
+     digitalWrite(RELAY_PIN_2, HIGH); // Включить реле
+    gir_on=false;
+  }
+}
+
+// Веб-страница для управления
+String generateHTMLPage() {
+  String page = "<!DOCTYPE html><html><head><meta charset='UTF-8'><title>Управление гирляндой</title>";
+  page += "<meta name='viewport' content='width=device-width, initial-scale=1.0'>";
+  page += "<style>";
+  page += "body { font-family: Arial, sans-serif; text-align: center; padding: 20px; background: #f3f4f6; color: #333; }";
+  page += "h1 { color: #007BFF; }";
+  page += "form { margin: 20px auto; width: 90%; max-width: 400px; padding: 20px; background: #fff; border-radius: 10px; box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1); }";
+  page += "label { display: block; margin-bottom: 10px; font-weight: bold; }";
+  page += "input { width: 100%; padding: 10px; margin: 10px 0; border: 1px solid #ccc; border-radius: 5px; }";
+  page += "input[type='submit'] { background: #007BFF; color: white; border: none; cursor: pointer; }";
+  page += "input[type='submit']:hover { background: #0056b3; }";
+  page += ".info { margin-top: 20px; padding: 10px; background: #e9ecef; border-radius: 5px; }";
+  page += "</style></head><body>";
+  page += "<h1>Настройки гирлянды</h1>";
+  page += "<form action='/set' method='POST'>";
+  page += "<label>Время включения:</label>";
+  page += "<input type='time' name='startTime' value='" + String(startHour < 10 ? "0" : "") + String(startHour) + ":" + String(startMinute < 10 ? "0" : "") + String(startMinute) + "'>";
+  page += "<label>Время выключения:</label>";
+  page += "<input type='time' name='stopTime' value='" + String(stopHour < 10 ? "0" : "") + String(stopHour) + ":" + String(stopMinute < 10 ? "0" : "") + String(stopMinute) + "'>";
+  page += "<input type='submit' value='Сохранить'>";
+  page += "</form>";
+  page += "<div class='info'>";
+  page += "<p><b>Статус Wi-Fi:</b> " + String(WiFi.isConnected() ? "Подключено" : "Не подключено") + "</p>";
+  page += "<p><b>Статус Гирлянды:</b> " + String(gir_on ? "Включена" : "Выключена") + "</p>";
+  page += "<p><b>IP адрес:</b> " + WiFi.localIP().toString() + "</p>";
+  page += "<p><b>Текущее время:</b> " + timeClient.getFormattedTime() + "</p>";
+  page += "</div></body></html>";
+  return page;
+}
+
+// Обработчики запросов
+void handleRoot() {
+  server.send(200, "text/html", generateHTMLPage());
+}
+
+void handleSet() {
+  if (server.hasArg("startTime") && server.hasArg("stopTime")) {
+    String startTime = server.arg("startTime");
+    String stopTime = server.arg("stopTime");
+
+    // Разбиваем строку времени
+    startHour = startTime.substring(0, 2).toInt();
+    startMinute = startTime.substring(3, 5).toInt();
+    stopHour = stopTime.substring(0, 2).toInt();
+    stopMinute = stopTime.substring(3, 5).toInt();
+
+    // Сохраняем настройки
+    saveSettings();
+  }
+  server.sendHeader("Location", "/");
+  server.send(303);
+}
 
 void setup() {
   Serial.begin(115200);
-  pinMode(relayPin, OUTPUT);
-  digitalWrite(relayPin, HIGH); // Отключить реле при запуске
 
-  // Настройка Wi-Fi с использованием статического IP
-  if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
+  // Настройка EEPROM
+  EEPROM.begin(4);
+  loadSettings();
+
+  // Настройка пина реле
+  pinMode(RELAY_PIN_1, OUTPUT);
+  digitalWrite(RELAY_PIN_1, HIGH); // Реле выключено по умолчанию
+ pinMode(RELAY_PIN_2, OUTPUT);
+  digitalWrite(RELAY_PIN_2, HIGH); // Реле выключено по умолчанию
+
+
+
+if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
     Serial.println("Ошибка настройки статического IP!");
   }
 
+  // Подключение к Wi-Fi
   WiFi.begin(ssid, password);
-  Serial.print("Подключение к Wi-Fi");
   while (WiFi.status() != WL_CONNECTED) {
     delay(1000);
-    Serial.print(".");
+    Serial.println("Подключение к Wi-Fi...");
   }
-  Serial.println("\nWi-Fi подключен.");
-  Serial.print("IP адрес: ");
-  Serial.println(WiFi.localIP());
+  Serial.println("Wi-Fi подключен");
+  Serial.println("IP адрес: " + WiFi.localIP().toString());
+
+  // Синхронизация времени через NTP
+  timeClient.begin();
+  timeClient.update();
 
   // Настройка веб-сервера
-  server.on("/", HTTP_GET, [](AsyncWebServerRequest *request) {
-    String html = R"rawliteral(
-<!DOCTYPE html>
-<html lang="en">
-<head>
-  <meta charset="UTF-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Управление гирляндой</title>
-  <style>
-    body {
-      font-family: Arial, sans-serif;
-      margin: 0;
-      padding: 0;
-      display: flex;
-      justify-content: center;
-      align-items: center;
-      min-height: 100vh;
-      background-color: #f4f4f9;
-      color: #333;
-    }
-    .container {
-      max-width: 400px;
-      width: 90%;
-      background: #fff;
-      padding: 20px;
-      box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
-      border-radius: 10px;
-    }
-    h1 {
-      font-size: 1.5rem;
-      margin-bottom: 20px;
-      text-align: center;
-    }
-    p {
-      font-size: 1rem;
-      margin-bottom: 10px;
-    }
-    form {
-      display: flex;
-      flex-direction: column;
-    }
-    input[type="number"],
-    input[type="submit"] {
-      padding: 10px;
-      margin-bottom: 15px;
-      border: 1px solid #ccc;
-      border-radius: 5px;
-      font-size: 1rem;
-    }
-    input[type="submit"] {
-      background: #007bff;
-      color: #fff;
-      cursor: pointer;
-      border: none;
-    }
-    input[type="submit"]:hover {
-      background: #0056b3;
-    }
-    .footer {
-      text-align: center;
-      margin-top: 15px;
-      font-size: 0.9rem;
-      color: #777;
-    }
-  </style>
-</head>
-<body>
-  <div class="container">
-    <h1>Управление гирляндой</h1>
-    <p>Статус Wi-Fi: <strong>)rawliteral" + String(WiFi.status() == WL_CONNECTED ? "Подключено" : "Отключено") + R"rawliteral(</strong></p>
-    <p>IP адрес: <strong>)rawliteral" + WiFi.localIP().toString() + R"rawliteral(</strong></p>
-    <p>Текущее время включения: <strong>)rawliteral" + String(startHour) + R"rawliteral(:00</strong></p>
-    <p>Текущее время выключения: <strong>)rawliteral" + String(stopHour) + R"rawliteral(:00</strong></p>
-    <form action="/set" method="POST">
-      <label>Время включения (час):</label>
-      <input type="number" name="startHour" value=")rawliteral" + String(startHour) + R"rawliteral(" min="0" max="23">
-      <label>Время выключения (час):</label>
-      <input type="number" name="stopHour" value=")rawliteral" + String(stopHour) + R"rawliteral(" min="0" max="23">
-      <input type="submit" value="Сохранить">
-    </form>
-    <div class="footer">
-      <p>ESP32 Controller © 2024</p>
-    </div>
-  </div>
-</body>
-</html>
-    )rawliteral";
-    request->send(200, "text/html", html);
-  });
-
-  server.on("/set", HTTP_POST, [](AsyncWebServerRequest *request) {
-    if (request->hasParam("startHour", true) && request->hasParam("stopHour", true)) {
-      startHour = request->getParam("startHour", true)->value().toInt();
-      stopHour = request->getParam("stopHour", true)->value().toInt();
-    }
-    request->send(200, "text/plain", "Параметры сохранены. Перезагрузите страницу.");
-  });
-
+  server.on("/", handleRoot);
+  server.on("/set", handleSet);
   server.begin();
-  Serial.println("Сервер запущен.");
 }
 
 void loop() {
-  // Проверка времени и управление реле
-  time_t now = time(nullptr);
-  struct tm *timeinfo = localtime(&now);
-  int currentHour = timeinfo->tm_hour;
-
-  if (currentHour >= startHour && currentHour < stopHour) {
-    digitalWrite(relayPin, LOW); // Включить реле
-  } else {
-    digitalWrite(relayPin, HIGH); // Отключить реле
-  }
+  timeClient.update(); // Обновляем текущее время
+  controlRelay(); // Проверяем, нужно ли включить/выключить гирлянду
+  server.handleClient(); // Обрабатываем запросы
+  delay(1000);
 }

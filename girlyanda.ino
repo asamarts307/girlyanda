@@ -159,8 +159,17 @@ if (!WiFi.config(local_IP, gateway, subnet, primaryDNS, secondaryDNS)) {
 }
 
 void loop() {
-  timeClient.update(); // Обновляем текущее время
-  controlRelay(); // Проверяем, нужно ли включить/выключить гирлянду
-  server.handleClient(); // Обрабатываем запросы
-  delay(1000);
+  static unsigned long lastUpdateTime = 0;  // Переменная для хранения времени последнего обновления
+  const unsigned long updateInterval = 10000;  // Интервал обновления в миллисекундах (10 секунд)
+
+  // Проверяем, прошло ли достаточно времени с последнего обновления
+  if (millis() - lastUpdateTime >= updateInterval) {
+    lastUpdateTime = millis(); // Обновляем время последнего выполнения
+
+    timeClient.update();       // Обновляем текущее время
+    controlRelay();            // Проверяем, нужно ли включить/выключить гирлянду
+  }
+
+  server.handleClient(); // Обрабатываем входящие HTTP-запросы
+}
 }
